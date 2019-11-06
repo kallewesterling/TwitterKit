@@ -1,12 +1,18 @@
-import json, yaml, re, time
+import json, yaml, re, time, tweepy
 from pathlib import Path
+from datetime import datetime
+from itertools import islice
 import progressbar as pb
 import pandas as pd
+
+from pprint import pprint # for dev purposes only
 
 
 # Constants
 SUPPRESS_WARNINGS = False
 PROGRESSBAR = False
+CREDENTIALS = './credentials.yml'
+
 
 
 
@@ -21,13 +27,40 @@ if not USER_CACHE_DIR.is_dir(): USER_CACHE_DIR.mkdir(parents=True)
 
 def _load_cache(id_str, cache_dir):
     tweet_cache = cache_dir / id_str
-    if not tweet_cache.is_file():
-        raise RuntimeError(f"File {tweet_cache} could not be opened.")
-    else:
+    if tweet_cache.is_file():
         with open(tweet_cache, "r") as f:
             _json = json.load(f)
+            _json['_cache_meta'] = {}
+            _json['_cache_meta']['ctime'] = datetime.strftime(datetime.fromtimestamp(tweet_cache.stat().st_ctime), "%Y-%m-%d %H:%M:%S")
+            _json['_cache_meta']['mtime'] = datetime.strftime(datetime.fromtimestamp(tweet_cache.stat().st_mtime), "%Y-%m-%d %H:%M:%S")
+            _json['_cache_meta']['atime'] = datetime.strftime(datetime.fromtimestamp(tweet_cache.stat().st_atime), "%Y-%m-%d %H:%M:%S")
         return(_json)
+    else:
+        return(None)
+        # raise RuntimeError(f"File {tweet_cache} could not be opened.")
 
+def _dump_cache(id_str, cache_dir, _json):
+    tweet_cache = cache_dir / id_str
+    if not tweet_cache.is_file():
+        with open(tweet_cache, "w+") as f:
+            json.dump(_json, f)
+        return(True)
+    else:
+        raise RuntimeError(f"Tweet {id_str} has already been downloaded: {tweet_cache}.")
+
+
+class _API():
+  def __init__(self, CREDENTIALS = CREDENTIALS):
+    CREDENTIALS = Path(CREDENTIALS)
+    if not CREDENTIALS.exists(): raise RuntimeError(f"Credentials file {CREDENTIALS} for Twitter API access does not exist.")
+    with open(CREDENTIALS, 'r') as f:
+      self.credentials = yaml.safe_load(f)
+    auth = tweepy.OAuthHandler(self.credentials['CONSUMER_KEY'], self.credentials['CONSUMER_SECRET'])
+    auth.set_access_token(self.credentials['ACCESS_TOKEN'], self.credentials['ACCESS_TOKEN_SECRET'])
+    self.api = tweepy.API(auth, wait_on_rate_limit=True, wait_on_rate_limit_notify=True)
+
+_api_class = _API()
+api = _api_class.api
 
 
 class TweetSet():
@@ -86,9 +119,13 @@ class TweetSet():
     def __len__(self):
       return(len(self.tweets))
 
-    
+
     def __getitem__(self, loc):
       return(self.tweets[loc])
+
+
+    def __repr__(self):
+      return(f"TwitterKit.TweetSet({self.ids})")
 
 
 class Filter():
@@ -127,61 +164,65 @@ class Tweet():
         self._json = _load_cache(self.id_str, self.cache_dir)
 
         if self._json is None:
-          print("Error!")
-        else:
-          self.error_handle()
+          self._download_live_data()
+          self._json = _load_cache(self.id_str, self.cache_dir)
 
-          self.created_at = self._json.get('created_at', None)
-          try:
-            self.created_at_ts = time.strftime('%Y-%m-%d %H:%M:%S', time.strptime(self.created_at,'%a %b %d %H:%M:%S +0000 %Y'))
-          except:
-            self.created_at_ts = None
-          self.full_text = self._json.get('full_text', None)
-          self.truncated = self._json.get('truncated', None)
-          self.entities = self._json.get('entities', None)
-          self.source = self._json.get('source', None)
-          self.in_reply_to_status_id_str = self._json.get('in_reply_to_status_id_str', None)
-          self.in_reply_to_user_id_str = self._json.get('in_reply_to_user_id_str', None)
-          self.in_reply_to_screen_name = self._json.get('in_reply_to_screen_name', None)
-          self.user = self._json.get('user', None)
-          self.geo = self._json.get('geo', None)
-          self.coordinates = self._json.get('coordinates', None)
-          self.place = self._json.get('place', None)
-          self.contributors = self._json.get('contributors', None)
-          self.is_quote_status = self._json.get('is_quote_status', None)
-          self.retweet_count = self._json.get('retweet_count', None)
-          self.favorite_count = self._json.get('favorite_count', None)
-          self.possibly_sensitive = self._json.get('possibly_sensitive', None)
-          self.lang = self._json.get('lang', None)
-          self.json_source = self._json.get('json_source', None)
-          if isinstance(self.user, dict): self.user = self.user['id_str']
-          self.user = User(self.user)
+        self.error_handle()
 
-          self.retweet = self.is_retweet()
+        self.created_at = self._json.get('created_at', None)
+        try:
+          self.created_at_ts = time.strftime('%Y-%m-%d %H:%M:%S', time.strptime(self.created_at,'%a %b %d %H:%M:%S +0000 %Y'))
+        except:
+          self.created_at_ts = None
+        self.full_text = self._json.get('full_text', None)
+        self.truncated = self._json.get('truncated', None)
+        self.entities = self._json.get('entities', None)
+        self.source = self._json.get('source', None)
+        self.in_reply_to_status_id_str = self._json.get('in_reply_to_status_id_str', None)
+        self.in_reply_to_user_id_str = self._json.get('in_reply_to_user_id_str', None)
+        self.in_reply_to_screen_name = self._json.get('in_reply_to_screen_name', None)
+        self.user = self._json.get('user', None)
+        self.geo = self._json.get('geo', None)
+        self.coordinates = self._json.get('coordinates', None)
+        self.place = self._json.get('place', None)
+        self.contributors = self._json.get('contributors', None)
+        self.is_quote_status = self._json.get('is_quote_status', None)
+        self.retweet_count = self._json.get('retweet_count', None)
+        self.favorite_count = self._json.get('favorite_count', None)
+        self.possibly_sensitive = self._json.get('possibly_sensitive', None)
+        self.lang = self._json.get('lang', None)
+        self.json_source = self._json.get('json_source', None)
+        self._meta = self._json.get('_cache_meta', None)
+        if isinstance(self.user, dict): self.user = self.user['id_str']
+        self.user = User(self.user)
 
-          self.data = {
-            'id': int(self.id_str),
-            'created_at': self.created_at,
-            'created_at_ts': self.created_at_ts,
-            'full_text': self.full_text,
-            'truncated': self.truncated,
-            'entities': self.entities,
-            'source': self.source,
-            'in_reply_to_status_id_str': self.in_reply_to_status_id_str,
-            'in_reply_to_user_id_str': self.in_reply_to_user_id_str,
-            'in_reply_to_screen_name': self.in_reply_to_screen_name,
-            'user': self.user,
-            'geo': self.geo,
-            'coordinates': self.coordinates,
-            'place': self.place,
-            'contributors': self.contributors,
-            'is_quote_status': self.is_quote_status,
-            'retweet_count': self.retweet_count,
-            'favorite_count': self.favorite_count,
-            'possibly_sensitive': self.possibly_sensitive,
-            'lang': self.lang,
-            'json_source': self.json_source
-          }
+        self.retweet = self.is_retweet()
+
+        self.data = {
+          'id': int(self.id_str),
+          'created_at': self.created_at,
+          'created_at_ts': self.created_at_ts,
+          'full_text': self.full_text,
+          'truncated': self.truncated,
+          'entities': self.entities,
+          'source': self.source,
+          'in_reply_to_status_id_str': self.in_reply_to_status_id_str,
+          'in_reply_to_user_id_str': self.in_reply_to_user_id_str,
+          'in_reply_to_screen_name': self.in_reply_to_screen_name,
+          'user': self.user,
+          'geo': self.geo,
+          'coordinates': self.coordinates,
+          'place': self.place,
+          'contributors': self.contributors,
+          'is_quote_status': self.is_quote_status,
+          'retweet_count': self.retweet_count,
+          'favorite_count': self.favorite_count,
+          'possibly_sensitive': self.possibly_sensitive,
+          'lang': self.lang,
+          'json_source': self.json_source,
+          'retweet': self.retweet,
+          '_meta': self._meta
+        }
 
 
     def is_retweet(self):
@@ -198,8 +239,24 @@ class Tweet():
                 print(f"Tried to display error message! {error}")
 
 
+    def _download_live_data(self):
+      status = api.get_status(self.id_str, tweet_mode="extended")
+      status._json['json_source'] = "Twitter"
+      _dump_cache(self.id_str, self.cache_dir, status._json)
+
+
     def __repr__(self):
       return(f"TwitterKit.Tweet({self.id_str})")
+
+
+    def __getitem__(self, key):
+      if isinstance(key, int) and key >= 0:
+          return "".join(list(islice(self.full_text, key, key + 1)))
+      elif isinstance(key, slice):
+          return "".join(list(islice(self.full_text, key.start, key.stop, key.step)))
+      else:
+          raise KeyError("Key must be non-negative integer or slice, not {}"
+                          .format(key))
 
 class User():
     def __init__(self, id_str):
@@ -208,6 +265,10 @@ class User():
         self.id_str = str(id_str)
         self._json = _load_cache(self.id_str, self.cache_dir)
 
+        if self._json is None:
+          self._download_live_data()
+          self._json = _load_cache(self.id_str, self.cache_dir)
+      
         self.contributors_enabled = self._json.get('contributors_enabled', None)
         self.created_at = self._json.get('created_at', None)
         self.description = self._json.get('description', None)
@@ -231,6 +292,8 @@ class User():
         self.url = self._json.get('url', None)
         self.utc_offset = self._json.get('utc_offset', None)
         self.verified = self._json.get('verified', None)
+        self.json_source = self._json.get('json_source', None)
+        self._meta = self._json.get('_cache_meta', None)
 
         self.data = {
           'contributors_enabled': self.contributors_enabled,
@@ -255,5 +318,14 @@ class User():
           'translator_type': self.translator_type,
           'url': self.url,
           'utc_offset': self.utc_offset,
-          'verified': self.verified
+          'verified': self.verified,
+          'json_source': self.json_source,
+          '_meta': self._meta
         }
+
+    def _download_live_data(self):
+      status = api.get_user(id=self.id_str)
+      print(self.id_str, self.cache_dir)
+      pprint(status)
+      status._json['json_source'] = "Twitter"
+      _dump_cache(self.id_str, self.cache_dir, status._json)
